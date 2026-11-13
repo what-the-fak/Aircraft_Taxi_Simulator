@@ -28,7 +28,7 @@ In PyCharm, set the project interpreter to `.venv` and run `main.py`. Dependenci
 | Tab | Content |
 |---|---|
 | **Gear geometry** | Plan view of the struts and wheels, CG, and static load per wheel (redraws live as you type). |
-| **Tire data** | Nose and main tires: 3 vertical loads (rated −, rated, rated +), each with an Fy vs slip table from 0 to 18°, plus a plot. *Fill table* writes the placeholder curve (15 % Fz at 6°, linear). After a run, the steady-state operating points are overlaid. |
+| **Tire data** | Nose and main tires: 3 vertical loads (rated −, rated, rated +), each with an Fy vs slip table (defaults 0, 3, 6 … 18°, plus 3 spare rows), and a plot. Blank rows are ignored, and a blank cell only drops that point, so each curve is built from the points it has. Past a curve's last point the force is held constant. *Fill table* writes the placeholder curve (15 % Fz at 6°, linear). After a run, the steady-state operating points are overlaid. |
 | **Results summary** | Required nose steer angle, yaw rate, lateral g, turn center, path radii (struts, wingtips, nose, tail), the force needed to hold speed, and a per-wheel table (slip, Fy, Fz, settle distance). |
 | **Steer & slip vs distance** | Steer command, slip, Fy and Fz for all tires, and reference-point radius, plotted against CG distance. |
 | **Slip per tire** | One subplot per tire: lagged tire slip, geometric slip, the steady-state line, and where it settles. |

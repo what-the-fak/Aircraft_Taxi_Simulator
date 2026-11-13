@@ -114,16 +114,25 @@ class PlotFrame(ttk.Frame):
         self.canvas.draw_idle()
 
 
+N_SPARE_ROWS = 3  # empty rows under the defaults for extra data points
+
+
 class TirePanel(ttk.LabelFrame):
-    """Editable tire data: 3 load cases x Fy(slip) table + plot."""
+    """Editable tire data: 3 load cases x Fy(slip) table + plot.
+
+    Blank rows are ignored, and a blank Fy cell only drops that point from that
+    load case's curve, so each curve uses however many points it has.
+    """
 
     def __init__(self, master, app, key, title):
         super().__init__(master, text=title, padding=6)
         self.app, self.key = app, key
+        self.n_rows = len(DEFAULT_SLIPS) + N_SPARE_ROWS
         self.v = {k: tk.StringVar() for k in ("size", "od", "width", "psi", "frac")}
         self.loads = [tk.StringVar() for _ in range(3)]
-        self.slips = [tk.StringVar(value=fmt(s)) for s in DEFAULT_SLIPS]
-        self.fy = [[tk.StringVar() for _ in DEFAULT_SLIPS] for _ in range(3)]
+        self.slips = [tk.StringVar() for _ in range(self.n_rows)]
+        self.fy = [[tk.StringVar() for _ in range(self.n_rows)] for _ in range(3)]
+        self._reset_slips()
         self.points = None
 
         top = ttk.Frame(self)
@@ -140,12 +149,14 @@ class TirePanel(ttk.LabelFrame):
             ttk.Label(tbl, text=LOAD_CASE_NAMES[j]).grid(row=1, column=j + 1)
             ttk.Entry(tbl, textvariable=self.loads[j], width=11, justify="right").grid(row=0, column=j + 1, padx=2)
         ttk.Label(tbl, text="Slip (deg)").grid(row=1, column=0)
-        for i in range(len(DEFAULT_SLIPS)):
+        for i in range(self.n_rows):
             ttk.Entry(tbl, textvariable=self.slips[i], width=7, justify="right").grid(row=i + 2, column=0, padx=2)
             for j in range(3):
                 ttk.Entry(tbl, textvariable=self.fy[j][i], width=11, justify="right").grid(row=i + 2, column=j + 1,
                                                                                           padx=2)
-        ttk.Label(tbl, text="Cornering force Fy (lb)").grid(row=len(DEFAULT_SLIPS) + 2, column=1, columnspan=3)
+        ttk.Label(tbl, text="Cornering force Fy (lb)").grid(row=self.n_rows + 2, column=1, columnspan=3)
+        ttk.Label(tbl, text="Blank rows or cells are ignored; rows may be in any order.",
+                  foreground="#555").grid(row=self.n_rows + 3, column=0, columnspan=4, sticky="w")
 
         bot = ttk.Frame(self)
         bot.pack(fill="x")
@@ -160,6 +171,13 @@ class TirePanel(ttk.LabelFrame):
         self.ax = self.plot.fig.add_subplot(111)
 
     # --------------------------------------------------------------
+    def _lab(self):
+        return "Nose" if self.key == "nose" else "Main"
+
+    def _reset_slips(self):
+        for i, var in enumerate(self.slips):
+            var.set(fmt(DEFAULT_SLIPS[i]) if i < len(DEFAULT_SLIPS) else "")
+
     def set_defaults(self, td: TireDefaults):
         self.v["size"].set(td.size)
         self.v["od"].set(fmt(td.od_in))
@@ -168,33 +186,60 @@ class TirePanel(ttk.LabelFrame):
         self.v["frac"].set(fmt(100 * td.fy_frac_at_6deg))
         for j, L in enumerate(td.loads):
             self.loads[j].set(fmt(round(L)))
-        for i, s in enumerate(DEFAULT_SLIPS):
-            self.slips[i].set(fmt(s))
+        self._reset_slips()
         self.fill_default()
 
     def fill_default(self):
+        """Fill Fy for every row that has a slip angle; rows without one are cleared."""
+        lab = self._lab()
         try:
-            loads = [parse(v, f"{self.key} load") for v in self.loads]
-            slips = [parse(v, f"{self.key} slip") for v in self.slips]
+            loads = [parse(v, f"{lab} tire load case") for v in self.loads]
             frac = parse(self.v["frac"], "default Fy %") / 100
+            slips = [None if not v.get().strip() else parse(v, f"{lab} tire slip angle") for v in self.slips]
         except InputError as e:
             messagebox.showerror("Tire data", str(e))
             return
-        tbl = default_curves(loads, slips, frac, 6.0)
-        for j in range(3):
-            for i in range(len(slips)):
-                self.fy[j][i].set(fmt(round(tbl[j, i], 1)))
+        for i, s in enumerate(slips):
+            col = default_curves(loads, [s], frac, 6.0)[:, 0] if s is not None else [None] * 3
+            for j in range(3):
+                self.fy[j][i].set("" if col[j] is None else fmt(round(col[j], 1)))
         self.replot()
 
+    def table_rows(self):
+        """Parsed (slips, fy[3, n]) from the non-blank rows, sorted by slip; blank Fy cells -> NaN."""
+        lab = self._lab()
+        rows = []
+        for i in range(self.n_rows):
+            s_txt = self.slips[i].get().strip()
+            f_txt = [self.fy[j][i].get().strip() for j in range(3)]
+            if not s_txt:
+                if any(f_txt):
+                    raise InputError(f"{lab} tire table row {i + 1} has Fy values but no slip angle")
+                continue
+            if not any(f_txt):
+                continue  # slip with no forces: nothing to use
+            s = parse(self.slips[i], f"{lab} tire slip angle (row {i + 1})")
+            f = [np.nan if not t else parse(self.fy[j][i], f"{lab} tire Fy (row {i + 1})")
+                 for j, t in enumerate(f_txt)]
+            rows.append((s, f))
+        if not rows:
+            raise InputError(f"{lab} tire table is empty")
+        rows.sort(key=lambda r: r[0])
+        slips = [r[0] for r in rows]
+        dup = [a for a, b in zip(slips, slips[1:]) if a == b]
+        if dup:
+            raise InputError(f"{lab} tire slip angle {fmt(dup[0])}° is entered twice")
+        return np.array(slips), np.array([r[1] for r in rows]).T
+
     def get(self) -> TireData:
-        lab = "Nose" if self.key == "nose" else "Main"
+        lab = self._lab()
+        slips, fy = self.table_rows()
         return TireData(
             name=self.key, size=self.v["size"].get(),
             od_in=parse(self.v["od"], f"{lab} tire OD"), width_in=parse(self.v["width"], f"{lab} tire width"),
             pressure_psi=parse(self.v["psi"], f"{lab} tire pressure"),
             loads_lb=[parse(v, f"{lab} tire load case") for v in self.loads],
-            slip_deg=[parse(v, f"{lab} tire slip angle") for v in self.slips],
-            fy_lb=[[parse(v, f"{lab} tire Fy") for v in row] for row in self.fy])
+            slip_deg=slips, fy_lb=fy)
 
     def state(self):
         return dict(v={k: x.get() for k, x in self.v.items()}, loads=[x.get() for x in self.loads],
@@ -205,6 +250,8 @@ class TirePanel(ttk.LabelFrame):
             self.v[k].set(x)
         for x, s in zip(self.loads, st["loads"]):
             x.set(s)
+        for x in self.slips + [c for row in self.fy for c in row]:
+            x.set("")
         for x, s in zip(self.slips, st["slips"]):
             x.set(s)
         for row, srow in zip(self.fy, st["fy"]):
@@ -223,12 +270,13 @@ class TirePanel(ttk.LabelFrame):
             ax.text(0.5, 0.5, str(e), ha="center", va="center", transform=ax.transAxes, wrap=True)
             self.plot.draw()
             return
-        sl = np.linspace(0, td.slip_deg.max(), 100)
         cols = ["#4C72B0", "#222222", "#C44E52"]
         for j in range(3):
-            ax.plot(td.slip_deg, td.fy_lb[j], "o", ms=3, color=cols[j])
+            s, f = td.curve(j)
+            ax.plot(s, f, "o", ms=3, color=cols[j])
+            sl = np.linspace(0, s.max(), 100)  # curve only over the range this load case has data
             ax.plot(sl, td.fy(sl, td.loads_lb[j]), "-", color=cols[j],
-                    label=f"{LOAD_CASE_NAMES[j]}: {td.loads_lb[j]:,.0f} lb")
+                    label=f"{LOAD_CASE_NAMES[j]}: {td.loads_lb[j]:,.0f} lb ({len(s)} pts)")
         if self.points is not None:
             a, f, names = self.points
             ax.plot(np.abs(a), np.abs(f), "D", color="#DD8452", ms=6, label="Steady-state operating pts")

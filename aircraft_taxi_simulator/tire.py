@@ -3,9 +3,12 @@
 Each tire type holds three vertical-load cases (rated-, rated, rated+) and a
 cornering-force table Fy(slip) for each, slip 0..18 deg.
 
+Blank cells are allowed (stored as NaN): each load case's curve is built only
+from the slip points it has a value for.
+
 Lookup for an arbitrary (slip, Fz):
-  * slip  : linear interpolation in the table, symmetric for negative slip,
-            held constant beyond the last slip point.
+  * slip  : linear interpolation in that load case's points, symmetric for
+            negative slip, held constant beyond its last slip point.
   * Fz    : linear interpolation between load cases, with an implicit
             (Fz = 0, Fy = 0) case below the lowest load and linear
             extrapolation above the highest load.
@@ -16,7 +19,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-DEFAULT_SLIPS = np.arange(0.0, 18.0 + 1e-9, 2.0)  # 0, 2, ... 18 deg
+DEFAULT_SLIPS = np.arange(0.0, 18.0 + 1e-9, 3.0)  # 0, 3, ... 18 deg
 LOAD_CASE_NAMES = ("Rated -", "Rated", "Rated +")
 
 
@@ -36,34 +39,44 @@ class TireData:
     pressure_psi: float = 200.0
     loads_lb: np.ndarray = field(default_factory=lambda: np.array([0.75, 1.0, 1.25]) * 40000)
     slip_deg: np.ndarray = field(default_factory=lambda: DEFAULT_SLIPS.copy())
-    fy_lb: np.ndarray | None = None  # shape (3, n_slip)
+    fy_lb: np.ndarray | None = None  # shape (3, n_slip); NaN = blank cell
 
     def __post_init__(self):
         self.loads_lb = np.asarray(self.loads_lb, float)
         self.slip_deg = np.asarray(self.slip_deg, float)
         if self.fy_lb is None:
             self.fy_lb = default_curves(self.loads_lb, self.slip_deg)
-        self.fy_lb = np.asarray(self.fy_lb, float)
+        self.fy_lb = np.array(self.fy_lb, dtype=float)  # None -> NaN
         self.prepare()
 
     # ------------------------------------------------------------------ setup
     def prepare(self):
         if self.fy_lb.shape != (len(self.loads_lb), len(self.slip_deg)):
             raise ValueError(f"{self.name}: Fy table shape does not match loads x slips")
-        if np.any(np.diff(self.slip_deg) <= 0):
-            raise ValueError(f"{self.name}: slip angles must be strictly increasing")
+        if len(self.slip_deg) == 0:
+            raise ValueError(f"{self.name}: no slip points entered")
+        if np.any(~np.isfinite(self.slip_deg)) or np.any(np.diff(self.slip_deg) <= 0):
+            raise ValueError(f"{self.name}: slip angles must be distinct and increasing")
         order = np.argsort(self.loads_lb)
         loads = self.loads_lb[order]
         if loads[0] <= 0 or np.any(np.diff(loads) <= 0):
             raise ValueError(f"{self.name}: load cases must be positive and distinct")
-        fy = self.fy_lb[order]
-        slips = self.slip_deg
-        if slips[0] > 0:  # make sure the curve passes through the origin
-            slips = np.concatenate([[0.0], slips])
-            fy = np.hstack([np.zeros((fy.shape[0], 1)), fy])
-        self._slips = slips
+        curves = [(np.array([0.0, 1.0]), np.array([0.0, 0.0]))]  # implicit Fz = 0 case
+        for j in order:
+            ok = np.isfinite(self.fy_lb[j])
+            if not ok.any():
+                raise ValueError(f"{self.name}: load case {self.loads_lb[j]:,.0f} lb has no Fy values")
+            s, f = self.slip_deg[ok], self.fy_lb[j][ok]
+            if s[0] > 0:  # make sure the curve passes through the origin
+                s, f = np.concatenate([[0.0], s]), np.concatenate([[0.0], f])
+            curves.append((s, f))
+        self._curves = curves
         self._loads = np.concatenate([[0.0], loads])
-        self._fy = np.vstack([np.zeros(len(slips)), fy])
+
+    def curve(self, j):
+        """(slips, Fy) points actually used for load case j (in entered order)."""
+        ok = np.isfinite(self.fy_lb[j])
+        return self.slip_deg[ok], self.fy_lb[j][ok]
 
     # ------------------------------------------------------------------ lookup
     def fy(self, alpha_deg, fz_lb):
@@ -71,7 +84,7 @@ class TireData:
         alpha = np.atleast_1d(np.asarray(alpha_deg, float))
         fz = np.broadcast_to(np.atleast_1d(np.asarray(fz_lb, float)), alpha.shape)
         a = np.abs(alpha)
-        vals = np.array([np.interp(a, self._slips, row) for row in self._fy])  # (n_load, n)
+        vals = np.array([np.interp(a, s, f) for s, f in self._curves])  # (n_load, n)
         L = self._loads
         idx = np.clip(np.searchsorted(L, fz, side="right") - 1, 0, len(L) - 2)
         w = (fz - L[idx]) / (L[idx + 1] - L[idx])
@@ -87,13 +100,15 @@ class TireData:
 
     @property
     def max_slip(self):
-        return float(self._slips[-1])
+        """Largest slip covered by every load case (forces are held constant beyond each curve's end)."""
+        return float(min(s[-1] for s, _ in self._curves[1:]))
 
     # ------------------------------------------------------------------ io
     def to_dict(self):
+        fy = [[None if not np.isfinite(v) else float(v) for v in row] for row in self.fy_lb]
         return dict(name=self.name, size=self.size, od_in=self.od_in, width_in=self.width_in,
                     pressure_psi=self.pressure_psi, loads_lb=self.loads_lb.tolist(),
-                    slip_deg=self.slip_deg.tolist(), fy_lb=self.fy_lb.tolist())
+                    slip_deg=self.slip_deg.tolist(), fy_lb=fy)
 
     @classmethod
     def from_dict(cls, d):

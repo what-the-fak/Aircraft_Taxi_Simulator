@@ -15,6 +15,7 @@ import math
 from dataclasses import dataclass, field
 
 from .layouts import LAYOUTS
+from .tire import default_relaxation
 
 
 @dataclass
@@ -27,10 +28,15 @@ class TireDefaults:
     minus_frac: float = 0.75  # rated- = minus_frac * rated
     plus_frac: float = 1.25   # rated+ = plus_frac * rated
     fy_frac_at_6deg: float = 0.15
+    relax_ft: tuple | None = None  # (rated-, rated, rated+) relaxation lengths, ft; None = estimate from OD
 
     @property
     def loads(self):
         return [self.minus_frac * self.rated_lb, self.rated_lb, self.plus_frac * self.rated_lb]
+
+    @property
+    def relaxation(self):
+        return list(self.relax_ft) if self.relax_ft is not None else list(default_relaxation(self.od_in))
 
 
 @dataclass

@@ -6,6 +6,10 @@ cornering-force table Fy(slip) for each, slip 0..18 deg.
 Blank cells are allowed (stored as NaN): each load case's curve is built only
 from the slip points it has a value for.
 
+Each load case also carries a relaxation length (ft). relax(Fz) interpolates
+linearly between the load cases and holds the end values outside them.
+All three = 0 means no lag (slip follows the geometry instantly).
+
 Lookup for an arbitrary (slip, Fz):
   * slip  : linear interpolation in that load case's points, symmetric for
             negative slip, held constant beyond its last slip point.
@@ -30,6 +34,17 @@ def default_curves(loads, slips=DEFAULT_SLIPS, fy_frac_at_ref=0.15, ref_slip_deg
     return np.outer(loads, fy_frac_at_ref * slips / ref_slip_deg)
 
 
+def default_relaxation(od_in, n_loads=3, frac_of_od=0.67, spread=0.12):
+    """Placeholder relaxation lengths (ft): 0.67 x tire OD at rated load, -/+12 % at rated -/+.
+
+    Only an estimate; replace with measured values when available.
+    """
+    rated = frac_of_od * od_in / 12.0
+    if n_loads == 3:
+        return rated * np.array([1 - spread, 1.0, 1 + spread])
+    return np.full(n_loads, rated)
+
+
 @dataclass
 class TireData:
     name: str
@@ -40,6 +55,7 @@ class TireData:
     loads_lb: np.ndarray = field(default_factory=lambda: np.array([0.75, 1.0, 1.25]) * 40000)
     slip_deg: np.ndarray = field(default_factory=lambda: DEFAULT_SLIPS.copy())
     fy_lb: np.ndarray | None = None  # shape (3, n_slip); NaN = blank cell
+    relax_ft: np.ndarray | None = None  # relaxation length per load case (ft), same order as loads_lb
 
     def __post_init__(self):
         self.loads_lb = np.asarray(self.loads_lb, float)
@@ -47,6 +63,9 @@ class TireData:
         if self.fy_lb is None:
             self.fy_lb = default_curves(self.loads_lb, self.slip_deg)
         self.fy_lb = np.array(self.fy_lb, dtype=float)  # None -> NaN
+        if self.relax_ft is None:
+            self.relax_ft = default_relaxation(self.od_in, len(self.loads_lb))
+        self.relax_ft = np.asarray(self.relax_ft, float)
         self.prepare()
 
     # ------------------------------------------------------------------ setup
@@ -72,6 +91,15 @@ class TireData:
             curves.append((s, f))
         self._curves = curves
         self._loads = np.concatenate([[0.0], loads])
+        if self.relax_ft.shape != self.loads_lb.shape or np.any(~np.isfinite(self.relax_ft)):
+            raise ValueError(f"{self.name}: enter a relaxation length for every load case")
+        if np.any(self.relax_ft < 0):
+            raise ValueError(f"{self.name}: relaxation lengths cannot be negative")
+        self.has_lag = bool(np.any(self.relax_ft > 0))
+        if self.has_lag and np.any(self.relax_ft <= 0):
+            raise ValueError(f"{self.name}: relaxation lengths must be all positive, or all 0 for no lag")
+        self._relax_loads = loads
+        self._relax = self.relax_ft[order]
 
     def curve(self, j):
         """(slips, Fy) points actually used for load case j (in entered order)."""
@@ -93,6 +121,14 @@ class TireData:
         f = np.where(fz > 0, f, 0.0)
         return np.sign(alpha) * f
 
+    def relax(self, fz_lb):
+        """Relaxation length (ft) at vertical load(s) fz: linear between load cases, ends held."""
+        return np.interp(fz_lb, self._relax_loads, self._relax)
+
+    @property
+    def min_relax(self):
+        return float(self._relax.min())
+
     def cornering_stiffness(self, fz_lb):
         """Approximate initial slope dFy/dalpha (lb/rad) at load fz."""
         d = 0.5
@@ -108,7 +144,7 @@ class TireData:
         fy = [[None if not np.isfinite(v) else float(v) for v in row] for row in self.fy_lb]
         return dict(name=self.name, size=self.size, od_in=self.od_in, width_in=self.width_in,
                     pressure_psi=self.pressure_psi, loads_lb=self.loads_lb.tolist(),
-                    slip_deg=self.slip_deg.tolist(), fy_lb=fy)
+                    slip_deg=self.slip_deg.tolist(), fy_lb=fy, relax_ft=self.relax_ft.tolist())
 
     @classmethod
     def from_dict(cls, d):

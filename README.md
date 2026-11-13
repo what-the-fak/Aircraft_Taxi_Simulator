@@ -53,8 +53,12 @@ Inputs can be saved and loaded as JSON. Results can be exported to CSV (every ti
   **+ slip means force to the left.** In a left turn, positive slip pulls toward the center.
 * Tire force comes from the tables: linear in slip (held beyond 18°) and linear in Fz between load
   cases, with an implicit Fz = 0 → Fy = 0 case and linear extrapolation above rated +.
-* Tire lag uses a first-order relaxation length: `dα/dt = V/σ (α_geometric − α)`. Setting σ = 0
-  gives pure geometric slip.
+* Tire lag uses a first-order relaxation length: `dα/dt = V_wheel/σ(Fz) (α_geometric − α)`. σ is
+  entered per load case on the Tire data tab (rated −, rated, rated +). At every time step each
+  wheel's σ is interpolated linearly on its current Fz, and held at the end values outside the load
+  cases, so outer wheels in a turn lag more than inner ones. All three = 0 means no lag. The
+  defaults are estimates: 0.67 × tire OD at rated load, −/+12 % at rated −/+. The steady-state
+  result does not depend on σ; it only changes the transient.
 * Steady state is solved directly with Newton's method on [v, r, δ] for the target radius at the
   chosen reference point (CG, nose gear, or main-gear centroid). The transient is RK4 integration
   with the nose steer ramped to that angle at the given rate, after a straight lead-in.
@@ -91,7 +95,7 @@ section 7.3.1 static loads:
 
 **Estimates you should replace:** CG height (10 ft), yaw radius of gyration (24–28.5 ft), tire
 rated loads (defaulted to half the max static strut load, with rated ± at ±25 %), relaxation lengths
-(nose 1.5 ft, main 2.5 ft), the planform outline, and the default cornering curves. The three
+(0.67 × OD, ±12 %), the planform outline, and the default cornering curves. The three
 "Example" widebody presets use made-up illustrative values that only exercise the other layouts.
 
 ## Adding configurations

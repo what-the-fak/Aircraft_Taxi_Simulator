@@ -45,7 +45,7 @@ class Wheel:
 
 class AircraftModel:
     def __init__(self, struts: list[Strut], weight_lb, x_cg, y_cg, h_cg, kz,
-                 tires: dict[str, TireData], sigma: dict[str, float]):
+                 tires: dict[str, TireData]):
         self.struts = struts
         self.W = float(weight_lb)
         self.m = self.W / G
@@ -81,7 +81,8 @@ class AircraftModel:
             if wh.axle_steer is not None:
                 groups.setdefault(id(wh.axle_steer), [wh.axle_steer, np.zeros(self.n, bool)])[1][i] = True
         self._axle_groups = [tuple(g) for g in groups.values()]
-        self.sigma = np.array([sigma.get(t, 0.0) for t in self.tire_key])
+        # tire lag: per tire type, relaxation length depends on each wheel's vertical load
+        self.lag = np.array([tires[t].has_lag for t in self.tire_key])
         for k in self.masks:
             if k not in tires:
                 raise KeyError(f"No tire data for tire type {k!r}")
@@ -154,6 +155,17 @@ class AircraftModel:
         alpha = -np.arctan2(vyw, vxw)
         speed = np.hypot(vx, vy)
         return x, y, dw, alpha, speed
+
+    def relaxation(self, fz):
+        """Per-wheel relaxation length (ft) at the wheels' current vertical loads."""
+        sig = np.zeros(self.n)
+        for k, mk in self.masks.items():
+            sig[mk] = self.tires[k].relax(fz[mk])
+        return sig
+
+    def min_relaxation(self):
+        vals = [self.tires[k].min_relax for k in self.masks if self.tires[k].has_lag]
+        return min(vals) if vals else None
 
     def tire_fy(self, alpha_rad, fz):
         fy = np.zeros(self.n)
@@ -287,8 +299,7 @@ def simulate(model: AircraftModel, u, ss: SteadyState, steer_rate_rad, lead_in_f
              ref_name="CG", psi0=np.pi / 2, band_frac=0.02, band_abs_deg=0.02):
     n = model.n
     xp, yp = model.ref_point(ref_name)
-    sig = model.sigma
-    lag = sig > 1e-6
+    lag = model.lag
     d_target = ss.delta
     t0 = lead_in_ft / u
     t_ramp = abs(d_target) / max(steer_rate_rad, 1e-9)
@@ -296,8 +307,9 @@ def simulate(model: AircraftModel, u, ss: SteadyState, steer_rate_rad, lead_in_f
     # time step: resolve tire relaxation and lateral (v) time constant
     ctot = max(model.total_cornering_stiffness(), 1.0)
     dt = min(0.01, 0.1 * model.m * u / ctot)
-    if lag.any():
-        dt = min(dt, 0.2 * sig[lag].min() / u)
+    smin = model.min_relaxation()
+    if smin is not None:
+        dt = min(dt, 0.2 * smin / u)
     dt = max(dt, 1e-4)
 
     def steer(t):
@@ -314,7 +326,8 @@ def simulate(model: AircraftModel, u, ss: SteadyState, steer_rate_rad, lead_in_f
         fz = model.vertical_loads(x, y, u * r)
         fyw = model.tire_fy(a_used, fz)
         Fx, Fy, Mz, _, _ = model.body_loads(x, y, dw, fyw)
-        dal = np.where(lag, spd / np.where(lag, sig, 1.0) * (ak - al), 0.0)
+        sig = np.where(lag, model.relaxation(fz), 1.0)  # relaxation length at the current Fz
+        dal = np.where(lag, spd / sig * (ak - al), 0.0)
         c, sn = np.cos(psi), np.sin(psi)
         dz = np.empty_like(z)
         dz[0] = u * c - v * sn

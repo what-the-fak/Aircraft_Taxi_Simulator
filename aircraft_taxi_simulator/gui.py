@@ -44,10 +44,6 @@ MANEUVER_FIELDS = [
     ("max_dist", "Max simulated distance", "ft"),
     ("max_steer", "Max nose steer angle", "deg"),
 ]
-TIRE_DYN_FIELDS = [
-    ("sigma_nose", "Nose tire relaxation length", "ft"),
-    ("sigma_main", "Main tire relaxation length", "ft"),
-]
 OUTLINE_FIELDS = [
     ("length", "Fuselage length", "ft"),
     ("span", "Wing span", "ft"),
@@ -58,8 +54,7 @@ OUTLINE_FIELDS = [
     ("wing_sweep", "Wing LE sweep", "deg"),
     ("n_engines", "Engines per side", "-"),
 ]
-DEFAULTS = dict(cg_y=0.0, radius=150.0, speed=10.0, steer_rate=10.0, lead_in=20.0, max_dist=1500.0,
-                sigma_nose=1.5, sigma_main=2.5)
+DEFAULTS = dict(cg_y=0.0, radius=150.0, speed=10.0, steer_rate=10.0, lead_in=20.0, max_dist=1500.0)
 
 
 class InputError(Exception):
@@ -130,6 +125,7 @@ class TirePanel(ttk.LabelFrame):
         self.n_rows = len(DEFAULT_SLIPS) + N_SPARE_ROWS
         self.v = {k: tk.StringVar() for k in ("size", "od", "width", "psi", "frac")}
         self.loads = [tk.StringVar() for _ in range(3)]
+        self.relax = [tk.StringVar() for _ in range(3)]
         self.slips = [tk.StringVar() for _ in range(self.n_rows)]
         self.fy = [[tk.StringVar() for _ in range(self.n_rows)] for _ in range(3)]
         self._reset_slips()
@@ -146,17 +142,23 @@ class TirePanel(ttk.LabelFrame):
         tbl.pack(fill="x", pady=4)
         ttk.Label(tbl, text="Vertical load (lb) →", font=("TkDefaultFont", 10, "bold")).grid(row=0, column=0)
         for j in range(3):
-            ttk.Label(tbl, text=LOAD_CASE_NAMES[j]).grid(row=1, column=j + 1)
             ttk.Entry(tbl, textvariable=self.loads[j], width=11, justify="right").grid(row=0, column=j + 1, padx=2)
-        ttk.Label(tbl, text="Slip (deg)").grid(row=1, column=0)
+        ttk.Label(tbl, text="Relaxation length (ft) →").grid(row=1, column=0, sticky="w")
+        for j in range(3):
+            ttk.Entry(tbl, textvariable=self.relax[j], width=11, justify="right").grid(row=1, column=j + 1, padx=2)
+            ttk.Label(tbl, text=LOAD_CASE_NAMES[j]).grid(row=2, column=j + 1)
+        ttk.Label(tbl, text="Slip (deg)").grid(row=2, column=0)
+        r0 = 3
         for i in range(self.n_rows):
-            ttk.Entry(tbl, textvariable=self.slips[i], width=7, justify="right").grid(row=i + 2, column=0, padx=2)
+            ttk.Entry(tbl, textvariable=self.slips[i], width=7, justify="right").grid(row=i + r0, column=0, padx=2)
             for j in range(3):
-                ttk.Entry(tbl, textvariable=self.fy[j][i], width=11, justify="right").grid(row=i + 2, column=j + 1,
+                ttk.Entry(tbl, textvariable=self.fy[j][i], width=11, justify="right").grid(row=i + r0, column=j + 1,
                                                                                           padx=2)
-        ttk.Label(tbl, text="Cornering force Fy (lb)").grid(row=self.n_rows + 2, column=1, columnspan=3)
-        ttk.Label(tbl, text="Blank rows or cells are ignored; rows may be in any order.",
-                  foreground="#555").grid(row=self.n_rows + 3, column=0, columnspan=4, sticky="w")
+        ttk.Label(tbl, text="Cornering force Fy (lb)").grid(row=self.n_rows + r0, column=1, columnspan=3)
+        ttk.Label(tbl, text="Blank rows or cells are ignored; rows may be in any order.\n"
+                            "Relaxation length is interpolated on Fz between load cases (ends held); "
+                            "all 0 = no lag.", foreground="#555", justify="left").grid(
+            row=self.n_rows + r0 + 1, column=0, columnspan=4, sticky="w")
 
         bot = ttk.Frame(self)
         bot.pack(fill="x")
@@ -186,6 +188,8 @@ class TirePanel(ttk.LabelFrame):
         self.v["frac"].set(fmt(100 * td.fy_frac_at_6deg))
         for j, L in enumerate(td.loads):
             self.loads[j].set(fmt(round(L)))
+        for j, s in enumerate(td.relaxation):
+            self.relax[j].set(fmt(round(s, 2)))
         self._reset_slips()
         self.fill_default()
 
@@ -239,10 +243,12 @@ class TirePanel(ttk.LabelFrame):
             od_in=parse(self.v["od"], f"{lab} tire OD"), width_in=parse(self.v["width"], f"{lab} tire width"),
             pressure_psi=parse(self.v["psi"], f"{lab} tire pressure"),
             loads_lb=[parse(v, f"{lab} tire load case") for v in self.loads],
-            slip_deg=slips, fy_lb=fy)
+            slip_deg=slips, fy_lb=fy,
+            relax_ft=[parse(v, f"{lab} tire relaxation length") for v in self.relax])
 
     def state(self):
         return dict(v={k: x.get() for k, x in self.v.items()}, loads=[x.get() for x in self.loads],
+                    relax=[x.get() for x in self.relax],
                     slips=[x.get() for x in self.slips], fy=[[x.get() for x in r] for r in self.fy])
 
     def set_state(self, st):
@@ -250,6 +256,9 @@ class TirePanel(ttk.LabelFrame):
             self.v[k].set(x)
         for x, s in zip(self.loads, st["loads"]):
             x.set(s)
+        if "relax" in st:
+            for x, s in zip(self.relax, st["relax"]):
+                x.set(s)
         for x in self.slips + [c for row in self.fy for c in row]:
             x.set("")
         for x, s in zip(self.slips, st["slips"]):
@@ -536,13 +545,6 @@ class App(tk.Tk):
         for i, (k, lab, u) in enumerate(MANEUVER_FIELDS):
             self._entry(f, k, lab, u, i + 2)
 
-        f = ttk.LabelFrame(root, text="Tire dynamics", padding=6)
-        f.pack(**pad)
-        for i, (k, lab, u) in enumerate(TIRE_DYN_FIELDS):
-            self._entry(f, k, lab, u, i)
-        ttk.Label(f, text="(0 = no lag: slip follows geometry instantly)", foreground="#555").grid(
-            row=3, column=0, columnspan=3, sticky="w")
-
         f = ttk.LabelFrame(root, text="Planform (animation & wingtip radius only)", padding=6)
         f.pack(**pad)
         for i, (k, lab, u) in enumerate(OUTLINE_FIELDS):
@@ -638,8 +640,8 @@ class App(tk.Tk):
         self.nb.add(sf, text="Results summary")
         self.summary = tk.Text(sf, height=22, font=("Menlo", 11), wrap="none")
         self.summary.pack(fill="x", padx=4, pady=4)
-        cols = ("tire", "x", "y", "fz0", "fz", "steer", "slip", "fy", "mu", "settle", "settle2", "radius")
-        heads = ("Tire", "x fwd CG (ft)", "y left (ft)", "Fz static (lb)", "Fz in turn (lb)", "Wheel steer (°)",
+        cols = ("tire", "x", "y", "fz0", "fz", "relax", "steer", "slip", "fy", "mu", "settle", "settle2", "radius")
+        heads = ("Tire", "x fwd CG (ft)", "y left (ft)", "Fz static (lb)", "Fz in turn (lb)", "Relax. length (ft)", "Wheel steer (°)",
                  "Slip SS (°)", "Fy SS (lb)", "Fy/Fz", "Settled @ s (ft)", "…after steer start (ft)",
                  "Path radius (ft)")
         tvf = ttk.Frame(sf)
@@ -682,7 +684,7 @@ class App(tk.Tk):
         if W <= 0:
             raise InputError("Weight must be positive")
         model = AircraftModel(struts, W, self._f("cg_x"), self._f("cg_y"), self._f("cg_h"), self._f("kz"),
-                              tires, {"nose": self._f("sigma_nose"), "main": self._f("sigma_main")})
+                              tires)
         return model, struts
 
     def _planform_cg(self, model, struts):
@@ -888,10 +890,12 @@ class App(tk.Tk):
         self.summary.insert("1.0", "\n".join(L))
 
         fz0 = model.vertical_loads(*model.geometry(0.0)[:2], 0.0)
+        relax = model.relaxation(ss.fz)
         self.table.delete(*self.table.get_children())
         for j, nm in enumerate(model.names):
             st = res.settle_s[j]
             vals = (model.tire_key[j], f"{ss.x[j]:.2f}", f"{ss.y[j]:.2f}", f"{fz0[j]:,.0f}", f"{ss.fz[j]:,.0f}",
+                    f"{relax[j]:.2f}" if model.lag[j] else "no lag",
                     f"{math.degrees(ss.dw[j]):.2f}", f"{math.degrees(ss.alpha[j]):.3f}", f"{ss.fy[j]:,.0f}",
                     f"{ss.fy[j] / ss.fz[j]:.4f}" if ss.fz[j] > 0 else "-",
                     "not settled" if np.isnan(st) else f"{st:.1f}",
@@ -1032,16 +1036,17 @@ class App(tk.Tk):
                 f"radius_{r['ref'].replace(' ', '_')}_ft"]
         for nm in model.names:
             k = nm.replace(" ", "_")
-            head += [f"{k}_slip_deg", f"{k}_geom_slip_deg", f"{k}_Fz_lb", f"{k}_Fy_lb"]
+            head += [f"{k}_slip_deg", f"{k}_geom_slip_deg", f"{k}_Fz_lb", f"{k}_Fy_lb", f"{k}_relax_ft"]
         with open(fn, "w", newline="") as f:
             w = csv.writer(f)
             w.writerow(head)
             for i in range(len(res.t)):
                 row = [res.t[i], res.s[i], math.degrees(res.delta[i]), math.degrees(res.r[i]), res.v[i],
                        res.X[i], res.Y[i], math.degrees(res.psi[i]), res.radius_ref[i]]
+                relax = np.where(model.lag, model.relaxation(res.fz[i]), 0.0)
                 for j in range(model.n):
                     row += [math.degrees(res.alpha[i, j]), math.degrees(res.alpha_kin[i, j]), res.fz[i, j],
-                            res.fy[i, j]]
+                            res.fy[i, j], relax[j]]
                 w.writerow([f"{x:.6g}" for x in row])
 
 
